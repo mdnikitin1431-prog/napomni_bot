@@ -1,22 +1,40 @@
 import asyncio
 import logging
 import sqlite3
+import os
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from aiohttp import web
 
 logging.basicConfig(level=logging.INFO)
 
-API_TOKEN = '8666205463:AAEADmz7GC5ozip_Tf-tjV1zkNj68EVTFng'
+# Берем токен из переменных окружения Render (для безопасности), либо локальный
+API_TOKEN = os.getenv("BOT_TOKEN", "8666205463:AAEADmz7GC5ozip_Tf-tjV1zkNj68EVTFng")
 DB_NAME = 'workout_bot.db'
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
 
-# --- РАБОТА С БАЗОЙ ДАННЫХ (SQLite) ---
+# --- ФЕЙКОВЫЙ ВЕБ-СЕРВЕР ДЛЯ ОБМАНА RENDER ---
+async def handle(request):
+    return web.Response(text="Бот-напоминалка работает круглосуточно!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    # Слушаем порт, который выдаст Render, или дефолтный 8080
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logging.info(f"Фейковый веб-сервер запущен на порту {port}")
+
+# --- БАЗА ДАННЫХ SQLite ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -79,7 +97,6 @@ def get_time_keyboard():
     builder.adjust(1)
     return builder.as_markup()
 
-# --- ОТПРАВКА НАПОМИНАНИЙ ---
 async def send_reminder():
     user_ids = get_all_users()
     for u_id in user_ids:
@@ -98,7 +115,7 @@ def update_evening_schedule(hour, minute):
             scheduler.remove_job(job.id)
     scheduler.add_job(send_reminder, 'cron', hour=hour, minute=minute, id='evening_reminder')
 
-# --- ОБРАБОТЧИКИ ТЕЛЕГРАМ ---
+# --- ХЕНДЛЕРЫ ТЕЛЕГРАМ ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
@@ -107,7 +124,7 @@ async def cmd_start(message: types.Message):
         save_user(user_id, streak=0, last_workout=None, hour=19, minute=30)
     
     await message.answer(
-        "Привет! Я твой личный тренер. Стрики активированы! 🔥\n"
+        "Привет! Я твой личный тренер. Стрики активны! 🔥\n"
         "Твоя цель — заниматься **3–4 раза в неделю**.\n\n"
         "Утреннее напоминание будет приходить в **9:00**.\n"
         "Выбери время для вечернего напоминания:",
@@ -123,7 +140,6 @@ async def process_time_selection(callback_query: types.CallbackQuery):
     
     user = get_user(user_id) or {"streak": 0, "last_workout": None}
     save_user(user_id, streak=user["streak"], last_workout=user["last_workout"], hour=hour, minute=minute)
-    
     update_evening_schedule(hour, minute)
     
     await bot.edit_message_text(
@@ -150,15 +166,12 @@ async def process_workout_done(callback_query: types.CallbackQuery):
     last_workout = user["last_workout"]
     
     if last_workout == today_str:
-        # Уже тренировался сегодня
         msg = f"🎉 Тренировка засчитана! Сегодня ты уже занимался. Текущий стрик: **{current_streak}** дн. подряд! 🔥"
     elif last_workout == yesterday_str or last_workout is None:
-        # Тренировался вчера или это самая первая тренировка
         current_streak += 1
         save_user(user_id, streak=current_streak, last_workout=today_str, hour=user["hour"], minute=user["minute"])
         msg = f"🎉 Отлично! Тренировка засчитана. Твой стрик растет: **{current_streak}** дн. подряд! 🔥"
     else:
-        # Прошлый стрик сгорел (прошло больше 1 дня)
         current_streak = 1
         save_user(user_id, streak=current_streak, last_workout=today_str, hour=user["hour"], minute=user["minute"])
         msg = f"Упс, был перерыв, и прошлый стрик сбросился. 🐾 Но ничего! Начинаем новый стрик: **1** день! Погнали! 💪"
@@ -171,14 +184,14 @@ async def process_workout_done(callback_query: types.CallbackQuery):
     )
     await callback_query.answer()
 
-# --- ЗАПУСК ---
 async def main():
     init_db()
+    await start_web_server() # Запускаем фейковый сайт
     scheduler.add_job(send_reminder, 'cron', hour=9, minute=0, id='morning_reminder')
     scheduler.add_job(send_reminder, 'cron', hour=19, minute=30, id='evening_reminder')
     scheduler.start()
     
-    print("Бот запущен локально с поддержкой базы данных SQLite и стриков...")
+    logging.info("Планировщик и бот успешно инициализированы.")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
